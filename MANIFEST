@@ -1,0 +1,7 @@
+lib/Games/Mines.pm
+lib/Games/Mines/Play.pm
+bin/pmines
+Makefile.PL
+t/01test.t
+MANIFEST
+README
