@@ -73,7 +73,7 @@ Quit the game and show the solution.
 
 =cut
 
-my($save_file) = "pmines.sav";
+my($save_file) = "./pmines.sav";
 
 my(%opt);
 GetOptions( \%opt,

@@ -4,9 +4,13 @@ require 5.005_62;
 use strict;
 use warnings;
 
+use Carp;
+use vars qw($AUTOLOAD);
+
+use Data::Dumper;
+
 use Games::Mines;
-our @ISA = qw(Games::Mines);
-our $VERSION = sprintf("%01d.%02d.%02d", 0,q$Revision: 1.4 $ =~ /(\d+)\.(\d+)/);
+our $VERSION = sprintf("%01d.%02d.%02d", 0,q$Revision: 1.11 $ =~ /(\d+)\.(\d+)/);
 
 =head1 NAME
 
@@ -14,10 +18,10 @@ Games::Mines::Play;
 
 =head1 SYNOPSIS
 
-    require Game::Mines::Play;
+    require Games::Mines::Play;
 
     # get new 30x40 mine field with 50 mines
-    my($game) = Game::Mines->new(30,40,50);
+    my($game) = Games::Mines->new(30,40,50);
 
     # use color text
     $game->set_ANSI_Color;
@@ -50,11 +54,30 @@ number of mines.
 =cut
 
 sub new {
-    my($class) =shift;
+    my($base) = shift;
     
-    my($mine_field) = $class->SUPER::new(@_);
+    # Get class or object ref and construct object
+    my($class) = ref($base) || $base;
+    
+    my($game) = 'Games::Mines';
+    
+    my($w,$h,$m) = (shift,shift,shift);
+    
+    if(@_) {
+	$game=shift;
+    }
+    
+    my($new_game) = $game->new($w,$h,$m);
+    return unless defined( $new_game);
+    
+    my($mine_field) = {
+	'GAME' => $new_game,
+	'map' =>'',
+	'game number' => 1,
+    };
+    
+    bless $mine_field, $class;
     $mine_field->set_ASCII;
-    $mine_field->{'game number'}=1;
     return $mine_field;
 }
 
@@ -125,45 +148,27 @@ sub print_out {
     my($type) = shift ||"field";
     my($w,$h);
     
-    my $cars= length($mine_field->height())-1;
-    my($format) = "%0". length($mine_field->width()+1). "u|";
-
-    foreach my $line (0..$cars) {
-	print " "x(length($mine_field->width()+1)+1);
-	
-	foreach my $i (0.. $mine_field->height()) {
-	    print substr(sprintf($format,$i),$line,1);
-	}
-	print "\n";
-    }
-
-    print 
-	" "x(length($mine_field->width()+1)),
-	"+",
-	"-"x($mine_field->height()+1),
-	"+\n";
-
+    $mine_field->_start_field;
+    
     for($w = 0; $w <= $mine_field->width(); $w++) {
-	printf($format,$w);
+	$mine_field->_start_line($w);
+	
 	for($h = 0; $h<= $mine_field->height(); $h++) {
+	    $mine_field->_start_cell($w,$h);
 	    if($type eq "field") {
-		print $mine_field->{map}->{ $mine_field->at($w,$h) };
+		$mine_field->_map( $mine_field->at($w,$h),$w,$h );
 	    }
 	    elsif($type eq "check") {
-		print $mine_field->{map}->{ $mine_field->_diff($w,$h) };
+		$mine_field->_map( $mine_field->_diff($w,$h),$w,$h );
 	    }
 	    elsif($type eq "solution") {
-		print $mine_field->{map}->{ $mine_field->_at($w,$h) };
+		$mine_field->_map( $mine_field->_at($w,$h),$w,$h );
 	    }
+	    $mine_field->_end_cell($w,$h);
 	}
-	print "|\n";
+	$mine_field->_end_line($w);
     }
-    print 
-	" "x(length($mine_field->width()+1)),
-	"+",
-	"-"x($mine_field->height()+1),
-	"+\n";
-
+    $mine_field->_end_field;
 }
 
 =item $obj->print_status_line
@@ -175,9 +180,10 @@ game has ended, it also prints out the ending text saying why.
 
 sub print_status_line {
     my($mine_field) = shift;
-    print "mines: ",$mine_field->{flags}," of ",$mine_field->{count},"\n";
+    print "mines: ",$mine_field->flags," of ",
+          $mine_field->count,"\n";
     unless($mine_field->running) {
-	print $mine_field->{why},"\n";
+	print $mine_field->why,"\n";
     }
 }
 
@@ -246,7 +252,7 @@ sub set_ANSI_Color {
 }
 
 
-=item $obj->save_game
+=item $obj->save_game($filename,$number)
 
 Saves the current game. Takes two arguments: The filename to save it
 to, and the game number to save it under. Note that if you give it
@@ -257,14 +263,16 @@ it is simply added to the end.
 =cut
 
 sub save_game {
-    my($mine_field) = shift;
+    my($field) = shift;
     my($file,$game) = @_;
+    my($reading)=1;
+    
+    my($mine_field) = $field->{'GAME'};
     
     $game ||=$mine_field->{'game number'};
-
+    
     unless( open(FILE, "$file") ){
-	warn("can't open file $file for saving: $!");
-	return;
+	$reading=0;
     }
     unless( open(FILE_TO, "> $file.working") ){
 	warn("can't open file $file.working for temporary file: $!");
@@ -273,11 +281,13 @@ sub save_game {
     
     my($line)="\n";
     # skip games untill we find the right one
-    while($line=<FILE>) {
-	last if( $line =~/Game\s+$game\s*$/);
-	print FILE_TO $line;
+    if($reading) {
+	while($line=<FILE>) {
+	    last if( $line =~/Game\s+$game\s*$/);
+	    print FILE_TO $line;
+	}
     }
-
+    
     print FILE_TO "Game $game\n";
     print FILE_TO $mine_field->width+1,"x",$mine_field->height+1,"\n";
 
@@ -319,28 +329,35 @@ sub save_game {
 	print FILE_TO "\n";
     }
     print FILE_TO"\n";
- 
-    while(not eof(FILE)) {
-	# dump old game number
-	while($line=<FILE>) {
-	    last if( $line =~/Game/);
-	}
-	
-	# copy rest of games
-	print FILE_TO  $line;
-	while($line=<FILE>) {
-	    print FILE_TO $line;
+    
+    if($reading) {
+	while(not eof(FILE)) {
+	    # dump old game number
+	    while($line=<FILE>) {
+		last if( $line =~/Game/);
+	    }
+	    last if( eof(FILE));
+	    # copy rest of games
+	    print FILE_TO  $line;
+	    while($line=<FILE>) {
+		print FILE_TO $line;
+	    }
 	}
     }
+    
     close(FILE_TO);
-    close(FILE);
-
-    rename($file,"$file.bak") || die("Can't move $file to backup: $!") &&
-	rename("$file.working",$file) ||die("Can't rename temporary file $file.working to $file: $!");
-
+    if($reading) {
+	close(FILE);
+    }
+    if($reading) {
+	rename($file,"$file.bak") || die("Can't move $file to backup: $!");
+    }
+    
+    rename("$file.working",$file) || 
+	die("Can't rename temporary file $file.working to $file: $!");
 }
 
-=item $obj->load_game
+=item $obj->load_game($filename,$number)
 
 Loads a previously saved game to replace the current game. It takes
 two arguments: the file name to get the game from and the game
@@ -350,11 +367,12 @@ number will leave the current game unchanged, and return undefined.
 =cut
 
 sub load_game {
-    my($mine_field) = shift;
+    my($field) = shift;
     my($file,$game) = @_;
-    $game ||=$mine_field->{'game number'};
     
-    my($old_w,$old_h) = ($mine_field->width,$mine_field->height);
+    my($old_field) = $field->{'GAME'};
+    
+    $game ||=$field->{'game number'};
     unless( open(FILE, $file) ){
 	warn("can't open save file  $file: $!");
 	return;
@@ -373,18 +391,19 @@ sub load_game {
     $line=~/\s*(\d+)x(\d+)/;
     my($width,$height) = ($1,$2);
     
-    $mine_field->_reset($width,$height);
+    my($mine_field) = $old_field->new($width,$height,0);
     
     my($w,$h);
     my($error)=0;
     # fill in playing field
     for($w =0;$w<=$mine_field->width;$w++) {
+	
 	$line=<FILE>;
 	
 	my(@sq) = split('',$line);
+	
 	my($cont,$vis);
 	for($h=0; $h<=$mine_field->height;$h++) {
-	    
 	    if($sq[$h] eq '.') { #no mine/unstepped
 		$mine_field->{field}[$w][$h]{visibility} = '.';
 	    }
@@ -406,6 +425,7 @@ sub load_game {
 		    contains => '*',
 		    visibility  => '.',
 		};
+		$mine_field->{count}++;
 		$mine_field->_fill_count($w,$h);
 	    }
 	    elsif($sq[$h] eq 'F') { #mine/flagged
@@ -416,6 +436,7 @@ sub load_game {
 		$mine_field->_fill_count($w,$h);
 		$mine_field->{flags}++;
 		$mine_field->{unknown}--;
+		$mine_field->{count}++;
 	    }
 	    elsif($sq[$h] eq 'X') { #mine/stepped : shouldn't happen
 		$mine_field->{field}[$w][$h] =  {
@@ -425,6 +446,7 @@ sub load_game {
 		$mine_field->_fill_count($w,$h);
 		$mine_field->{flags}++;
 		$mine_field->{unknown}--;
+		$mine_field->{count}++;
 	    }
 	    else { #got something totaly unknown
 		die("Don't know how to interpret $sq[$h] in Game $game at line $.\n");
@@ -435,15 +457,73 @@ sub load_game {
     }
     
     if($error) {
-	$mine_field->_reset($old_w,$old_h);
+	$field->{'GAME'} = $old_field;
 	return;
     }
+    
     $mine_field->{on} =  1;
-
+    $field->{'GAME'} = $mine_field;
+    
     return 1;
 }
 
 =begin for developers
+
+=cut
+
+sub _start_field {
+    my($mine_field) = shift;
+    my($w,$h);
+    
+    my $cars= length($mine_field->height());
+    my($format) = "%0". length($mine_field->height()). "u";
+    
+    foreach my $line (0.. $cars-1 ) {
+	print " "x(length($mine_field->width())+1);
+	
+	foreach my $h (0.. $mine_field->height()) {
+	    print substr(sprintf($format,$h),$line,1);
+	}
+	print "\n";
+    }
+    
+    print 
+	" "x(length($mine_field->width())),
+	"+",
+	"-"x($mine_field->height()+1),
+	"+\n";
+}
+
+sub _end_field {
+    my($mine_field) = shift;
+    print 
+	" "x(length($mine_field->width())),
+	"+",
+	"-"x($mine_field->height()+1),
+	"+\n";
+}
+
+sub _start_line {
+    my($mine_field) = shift;
+    my($line) = shift;
+    my($format) = "%0". length($mine_field->width()). "u|";
+    printf($format,$line);
+}
+
+sub _end_line {
+    print "|\n";
+}
+
+sub _map {
+    my($mine_field) = shift;
+    
+    my($value) = shift;
+    print $mine_field->{map}->{ $value };
+}
+
+sub _start_cell {1;}
+
+sub _end_cell {1;}
 
 =item $obj->_diff
 
@@ -453,8 +533,9 @@ wrongly marked or stepped fields.
 =cut
 
 sub _diff {
-    my($mine_field) = shift;
-    my($w,$h) = $mine_field->_limit(@_);
+    my($field) = shift;
+    my($mine_field) = $field->{'GAME'};
+    my($w,$h) = @_;
     
     if($mine_field->shown($w,$h)) {
 	return $mine_field->_at($w,$h);
@@ -473,6 +554,27 @@ sub _diff {
     return $mine_field->_at($w,$h);
 }
 
+=item AUTOLOAD 
+
+Pass any unknown method calls to the contined object.
+
+=cut
+
+sub AUTOLOAD {
+    my($game) = shift;
+    
+    # DESTROY messages should never be propagated.
+    return if $AUTOLOAD =~ /::DESTROY$/;
+    
+    my($attr) = $AUTOLOAD;
+    $attr =~ s/^.*:://;
+
+    unless (  $game->{GAME}->can($attr)) {
+      croak "Don't have a method of type $attr";
+    }
+    
+    $game->{GAME}->$attr(@_);
+}
 
 =end for developers
 
